@@ -1,0 +1,1647 @@
+#include <ESP8266WiFi.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <ESP8266WebServer.h>
+#include <NTPClient.h>
+#include <WiFiUdp.h>
+#include <WiFiManager.h>
+#include <algorithm> // 用于std::min
+#include <cstring>
+#include <stdio.h>
+#include <AutoConnect.h>
+#include <TimeLib.h>      // 添加时间库
+#include <EEPROM.h>       // 使用内置Flash模拟EEPROM
+/*
+// 假设EEPROM地址为0x50
+const uint8_t EEPROM_ADDRESS = 0x50;
+// EEPROM每页8字节
+const int EEPROM_PAGE_SIZE = 8;
+// EEPROM总大小256字节
+const int EEPROM_TOTAL_SIZE = 256;
+*/
+/*
+// 全局声明每页64字节
+#define EEPROM_PAGE_SIZE 8
+#define EEPROM_TOTAL_SIZE 256 // 根据24C128芯片容量128K位换算成字节得到，即16384字节
+//#define WRITE_DELAY  10
+
+// 24C128 EEPROM相关定义
+#define EEPROM_ADDRESS 0x50
+
+*/
+/*
+// EEPROM相关定义
+#define EEPROM_ADDRESS 0x50        // EEPROM I2C地址
+#define EEPROM_PAGE_SIZE 8         // 每页8字节
+#define EEPROM_TOTAL_PAGES 32      // 总共32页
+#define EEPROM_TOTAL_SIZE (EEPROM_PAGE_SIZE * EEPROM_TOTAL_PAGES) // EEPROM总大小
+*/
+#define SCL_PIN D10
+#define SDA_PIN D9
+
+// 设置OLED屏幕的宽度和高度
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+
+// 设置NTP服务器和时区
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 3600 * 8);
+
+// 定义输出引脚
+const int relay1Pin = 0;
+const int relay2Pin = 2;
+
+// 定义OLED的I2C引脚
+// 这里与24C128的SCL和SDA引脚相同
+const int sclPin = 1;
+const int sdaPin = 3;
+
+// 全局变量，用于记录上次检查IP的时间
+unsigned long lastIPCheckTime = 0;
+
+// OLED屏幕对象
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+// Web服务器对象
+ESP8266WebServer server(80);
+
+// 结构体存储时间信息
+struct TimeInfo {
+    int hour;
+    int minute;
+    int second;
+    int day;
+    int month;
+    int year;
+};
+
+
+// 定时设置相关变量，需要在合适的地方定义并初始化
+int startHourForGroup1, startMinuteForGroup1, endHourForGroup1, endMinuteForGroup1;
+bool isTimedGroup1;
+int startHourForGroup2, startMinuteForGroup2, endHourForGroup2, endMinuteForGroup2;
+bool isTimedGroup2;
+
+/*
+// 存储定时的开始小时和分钟
+int startHourForGroup1 = 0;
+int startMinuteForGroup1 = 0;
+
+// 存储定时的结束小时和分钟
+int endHourForGroup1 = 0;
+int endMinuteForGroup1 = 0;
+
+// 存储第二个定时的开始小时和分钟
+int startHourForGroup2 = 0;
+int startMinuteForGroup2 = 0;
+
+// 存储第二个定时的结束小时和分钟
+int endHourForGroup2 = 0;
+int endMinuteForGroup2 = 0;
+
+// 标志位，判断是否设置了定时
+bool isTimedGroup1 = false;
+bool isTimedGroup2 = false;
+*/
+// 记录总的WiFi连接尝试次数
+int totalReconnectAttempts = 0; 
+
+// 标记是否处于首次启动后的连接尝试阶段
+bool isInitialConnectionAttempt = true; 
+
+// 记录WiFi连接尝试次数（新功能所需）
+int wifiConnectAttempts = 0;
+
+// 标记是否已经尝试重新配网（新功能所需）
+bool isReconfiguring = false;
+
+// 记录上电或重启后的WiFi连接尝试次数
+int powerOnWifiConnectAttempts = 0;
+
+// 标记是否为上电或重启后的首次连接尝试
+bool isPowerOnInitialConnection = true;
+
+unsigned long lastIPUpdateTime = 0; // 初始化它为0，可根据实际情况调整初始值
+
+// 全局变量，用于记录首次尝试连接WiFi的时间戳
+unsigned long firstConnectAttemptTime = 0;
+// 全局变量，用于记录每次连接尝试开始的时间戳
+unsigned long currentConnectAttemptStartTime = 0;
+// 全局变量，用于记录总的连接耗时（累计每次连接尝试的时间间隔）
+unsigned long totalConnectionTimeElapsed = 0;
+
+// 全局变量，用于记录断网开始时间（以毫秒为单位）
+unsigned long disconnectionStartTimeMillis = 0;
+
+// 存储IP地址的字符串
+String ipAddressStr;
+
+// 用于滚动的字符串
+String scrollText = "If you have a dream, you will definitely come true, and my dream is to make 100 million. yaoyang production";
+int scrollPosition = 0;
+
+// 登录状态标志
+bool isLoggedIn = false;
+
+// 管理员用户名和密码
+const char* adminUsername = "admin";
+const char* adminPassword = "password";
+
+// 自定义错误提示相关宏定义
+#define WIFI_CONNECT_FAILED_MSG "WiFi连接失败，请检查网络或通过手机重新配置"
+#define WIFI_CHANGED_MSG "WiFi信息已变更，需重新配置网络"
+#define NO_SAVED_NETWORK_MSG "未找到保存的网络，可通过手机配置新网络"
+
+// 记录WiFi连接尝试次数
+int wifiReconnectAttempts = 0;
+
+// 函数声明
+TimeInfo getCurrentTime();
+void updateOLED();
+void handleRoot();
+void handleSetTime1();
+void handleSetTime2();
+void handleCancelTiming1();
+void handleCancelTiming2();
+void handleRelay1();
+void handleRelay2();
+void handleLogin();
+void handleTaskList();
+void writeEEPROM(int address, const char* data);
+String readEEPROM(int address, int length);
+bool isInOnPeriod(int startHour, int startMinute, int endHour, int endMinute);
+// 函数声明（如果函数定义在后面，先进行前置声明）
+void writeTimingSettingsToEEPROM();
+// WiFi连接成功回调函数声明
+void wifiConnectedCallback();
+// WiFi连接失败回调函数声明
+void wifiConnectFailedCallback();
+
+void attemptPowerOnWiFiConnection(); // 这就是前置声明
+
+// 获取当前时间的函数
+TimeInfo getCurrentTime() {
+    time_t epochTime = timeClient.getEpochTime();
+    struct tm *timeInfo;
+    timeInfo = localtime(&epochTime);
+    TimeInfo currentTime;
+    currentTime.hour = timeInfo->tm_hour;
+    currentTime.minute = timeInfo->tm_min;
+    currentTime.second = timeInfo->tm_sec;
+    currentTime.day = timeInfo->tm_mday;
+    currentTime.month = timeInfo->tm_mon + 1;
+    currentTime.year = timeInfo->tm_year + 1900;
+    return currentTime;
+}
+
+// 更新OLED显示内容的函数
+void updateOLED() {
+    display.clearDisplay();
+    // 显示日期时间
+    TimeInfo currentTime = getCurrentTime();
+    display.setCursor(0, 0);
+    display.print(currentTime.day);
+    display.print("/");
+    display.print(currentTime.month);
+    display.print("/");
+    display.print(currentTime.year);
+    display.setCursor(80, 0);
+    display.print(currentTime.hour);
+    display.print(":");
+    display.print(currentTime.minute);
+    display.print(":");
+    display.print(currentTime.second);
+    // 显示IP地址
+    display.setCursor(0, 10);
+    display.println(ipAddressStr);
+    // 显示继电器状态
+    display.setCursor(0, 20);
+    display.print(digitalRead(relay1Pin)? "Relay 1: ON " : "Relay 1: OFF ");
+    display.setCursor(0, 30);
+    display.print(digitalRead(relay2Pin)? "Relay 2: ON" : "Relay 2: OFF");
+    // 显示定时设置
+    if (isTimedGroup1) {
+        display.setCursor(0, 40);
+        display.print("time 1: ");
+        display.print(startHourForGroup1);
+        display.print(":");
+        display.print(startMinuteForGroup1);
+        display.print(" - ");
+        display.print(endHourForGroup1);
+        display.print(":");
+        display.print(endMinuteForGroup1);
+    } else {
+        display.setCursor(0, 40);
+        display.println("No timing set");
+    }
+    if (isTimedGroup2) {
+        display.setCursor(0, 50);
+        display.print("time 2: ");
+        display.print(startHourForGroup2);
+        display.print(":");
+        display.print(startMinuteForGroup2);
+        display.print(" - ");
+        display.print(endHourForGroup2);
+        display.print(":");
+        display.print(endMinuteForGroup2);
+    } else {
+        display.setCursor(0, 50);
+        display.println("Timer switch V3.6.3");
+    }
+    // 显示滚动的底部文本
+    display.setCursor(0, SCREEN_HEIGHT - 8);
+    display.print(scrollText.substring(scrollPosition));
+    scrollPosition++;
+    if (scrollPosition >= scrollText.length()) {
+        scrollPosition = 0;
+    }
+    display.display();
+}
+
+// 处理根路由的函数
+void handleRoot() {
+    if (!isLoggedIn) {
+        server.sendHeader("Location", "/login");
+        server.send(303);
+        return;
+    }
+    String html = "<!DOCTYPE html>"
+                  "<html lang=\"zh-CN\">"
+                  "<head>"
+                      "<meta charset=\"UTF-8\">"
+                      "<title>继电器控制</title>"
+                      "<style>"
+                          "body {"
+                              " background-color: #4CAF50;"
+                              " color: white;"
+                              " font-family: Arial, sans-serif;"
+                              " text-align: center;"
+                              " padding-top: 50px;"
+                          "}"
+                          "a {"
+                              " display: block;"
+                              " margin: 20px 0;"
+                              " padding: 10px 20px;"
+                              " background-color: #008CBA;"
+                              " color: white;"
+                              " text-decoration: none;"
+                              " border-radius: 5px;"
+                          "}"
+                          "a:hover {"
+                              " background-color: #005f73;"
+                          "}"
+                      "</style>"
+                  "</head>"
+                  "<body>"
+                      "<h1>继电器控制</h1>"
+                      "<p><a href=\"/relay1?state=1\">打开继电器1</a></p>"
+                      "<p><a href=\"/relay1?state=0\">关闭继电器1</a></p>"
+                      "<p><a href=\"/relay2?state=1\">打开继电器2</a></p>"
+                      "<p><a href=\"/relay2?state=0\">关闭继电器2</a></p>"
+                      "<p><a href=\"/setTime1\">设置定时 - 组1</a></p>"
+                      "<p><a href=\"/setTime2\">设置定时 - 组2</a></p>"
+                      "<p><a href=\"/cancelTiming1\">取消定时 - 组1</a></p>"
+                      "<p><a href=\"/cancelTiming2\">取消定时 - 组2</a></p>"
+                      "<p><a href=\"/taskList\">查看任务列表</a></p>"
+                      "<p><a href=\"/reboot\">重启设备</a></p>"  // 添加重启设备按钮
+                      "<p><a href=\"/clearWifiConfig\">清除配置网络</a></p>"  // 添加清除配置网络按钮
+                  "</body>"
+                  "</html>";
+    server.send(200, "text/html; charset=utf-8", html);
+}
+
+// 处理设置定时1的函数
+void handleSetTime1() {
+    if (!isLoggedIn) {
+        server.sendHeader("Location", "/login");
+        server.send(303);
+        return;
+    }
+    if (server.method() == HTTP_POST) {
+        startHourForGroup1 = server.arg("startHourForGroup1").toInt();
+        startMinuteForGroup1 = server.arg("startMinuteForGroup1").toInt();
+        endHourForGroup1 = server.arg("endHourForGroup1").toInt();
+        endMinuteForGroup1 = server.arg("endMinuteForGroup1").toInt();
+        isTimedGroup1 = true;
+        // 将定时设置写入EEPROM
+        writeTimingSettingsToEEPROM();
+        server.send(200, "text/html; charset=utf-8", "设置成功！");
+    } else if (server.method() == HTTP_GET) {
+        String html = "<html><head><meta charset=\"UTF-8\"></head><body>"
+                      "<style>"
+                      "body {"
+                      " background-color: #0074D9;"
+                      " color: white;"
+                      " font-family: Arial, sans-serif;"
+                      " text-align: center;"
+                      " padding-top: 50px;"
+                      "}"
+                      "form {"
+                      " margin-top: 50px;"
+                      "}"
+                      "input {"
+                      " padding: 10px; margin: 10px;"
+                      "}"
+                      "button {"
+                      " padding: 10px 20px;"
+                      "}"
+                      "</style>"
+                      "<h1>设置定时时间 - 组1</h1>"
+                      "<form method='post' action='/setTime1'>"
+                      "开启时间：<br>"
+                      "小时：<input type='number' name='startHourForGroup1' min='0' max='23' value='" + String(startHourForGroup1) + "'>"
+                      "分钟：<input type='number' name='startMinuteForGroup1' min='0' max='59' value='" + String(startMinuteForGroup1) + "'><br><br>"
+                      "关闭时间：<br>"
+                      "小时：<input type='number' name='endHourForGroup1' min='0' max='23' value='" + String(endHourForGroup1) + "'>"
+                      "分钟：<input type='number' name='endMinuteForGroup1' min='0' max='59' value='" + String(endMinuteForGroup1) + "'><br><br>"
+                      "<input type='submit' value='设置定时'>"
+                      "</form>"
+                      "</body></html>";
+        server.send(200, "text/html; charset=utf-8", html);
+    }
+}
+
+// 处理设置定时2的函数
+void handleSetTime2() {
+    if (!isLoggedIn) {
+        server.sendHeader("Location", "/login");
+        server.send(303);
+        return;
+    }
+    if (server.method() == HTTP_POST) {
+        startHourForGroup2 = server.arg("startHourForGroup2").toInt();
+        startMinuteForGroup2 = server.arg("startMinuteForGroup2").toInt();
+        endHourForGroup2 = server.arg("endHourForGroup2").toInt();
+        endMinuteForGroup2 = server.arg("endMinuteForGroup2").toInt();
+        isTimedGroup2 = true;
+        // 将定时设置写入EEPROM
+        writeTimingSettingsToEEPROM();
+        server.send(200, "text/html; charset=utf-8", "设置成功！");
+    } else if (server.method() == HTTP_GET) {
+        String html = "<html><head><meta charset=\"UTF-8\"></head><body>"
+                      "<style>"
+                      "body {"
+                      " background-color: #0074D9;"
+                      " color: white;"
+                      " font-family: Arial, sans-serif;"
+                      " text-align: center;"
+                      " padding-top: 50px;"
+                      "}"
+                      "form {"
+                      " margin-top: 50px;"
+                      "}"
+                      "input {"
+                      " padding: 10px; margin: 10px;"
+                      "}"
+                      "button {"
+                      " padding: 10px 20px;"
+                      "}"
+                      "</style>"
+                      "<h1>设置定时时间 - 组2</h1>"
+                      "<form method='post' action='/setTime2'>"
+                      "开启时间：<br>"
+                      "小时：<input type='number' name='startHourForGroup2' min='0' max='23' value='" + String(startHourForGroup2) + "'>"
+                      "分钟：<input type='number' name='startMinuteForGroup2' min='0' max='59' value='" + String(startMinuteForGroup2) + "'><br><br>"
+                      "关闭时间：<br>"
+                      "小时：<input type='number' name='endHourForGroup2' min='0' max='23' value='" + String(endHourForGroup2) + "'>"
+                      "分钟：<input type='number' name='endMinuteForGroup2' min='0' max='59' value='" + String(endMinuteForGroup2) + "'><br><br>"
+                      "<input type='submit' value='设置定时'>"
+                      "</form>"
+                      "</body></html>";
+        server.send(200, "text/html; charset=utf-8", html);
+    }
+}
+
+// 处理取消定时1的函数
+void handleCancelTiming1() {
+    if (!isLoggedIn) {
+        server.sendHeader("Location", "/login");
+        server.send(303);
+        return;
+    }
+    isTimedGroup1 = false;
+    // 将定时设置写入EEPROM
+    writeTimingSettingsToEEPROM();
+    String html = "<html><head><meta charset=\"text/html; charset=UTF-8\"></meta></head><body>"
+                  "<style>"
+                  "body {"
+                  " background-color: #0074D9;"
+                  " color: white;"
+                  " font-family: Arial, sans-serif;"
+                  " text-align: center;"
+                  " padding-top: 50px;"
+                  "}"
+                  "</style>"// 处理取消定时1的函数（续）
+                  "<h1>取消定时 - 组1</h1>"
+                  "<p>定时已取消！</p>"
+                  "<a href='/'>返回主页面</a>"
+                  "</body></html>";
+    server.send(200, "text/html; charset=utf-8", html);
+}
+
+// 处理取消定时2的函数
+void handleCancelTiming2() {
+    if (!isLoggedIn) {
+        server.sendHeader("Location", "/login");
+        server.send(303);
+        return;
+    }
+    isTimedGroup2 = false;
+    // 将定时设置写入EEPROM
+    writeTimingSettingsToEEPROM();
+    String html = "<html><head><meta charset=\"text/html; charset=UTF-8\"></meta></head><body>"
+                  "<style>"
+                  "body {"
+                  " background-color: #0074D9;"
+                  " color: white;"
+                  " font-family: Arial, sans-serif;"
+                  " text-align: center;"
+                  " padding-top: 50px;"
+                  "}"
+                  "</style>"
+                  "<h1>取消定时 - 组2</h1>"
+                  "<p>定时已取消！</p>"
+                  "<a href='/'>返回主页面</a>"
+                  "</body></html>";
+    server.send(200, "text/html; charset=utf-8", html);
+}
+
+// 处理继电器1控制的函数
+void handleRelay1() {
+    if (!isLoggedIn) {
+        server.sendHeader("Location", "/login");
+        server.send(303);
+        return;
+    }
+    String state = server.arg("state");
+    if (state == "1") {
+        digitalWrite(relay1Pin, HIGH); 
+    } else if (state == "0") {
+        digitalWrite(relay1Pin, LOW); 
+    }
+    server.send(200, "text/plain", "Relay 1 state changed");
+}
+
+// 处理继电器2控制的函数
+void handleRelay2() {
+    if (!isLoggedIn) {
+        server.sendHeader("Location", "/login");
+        server.send(303);
+        return;
+    }
+    String state = server.arg("state");
+    Serial.println("获取到的继电器2控制参数: " + state);
+    if (state == "1") {
+        Serial.println("尝试打开继电器2");
+        digitalWrite(relay2Pin, HIGH);
+        Serial.println("已执行打开继电器2操作");
+    } else if (state == "0") {
+        Serial.println("尝试关闭继电器2");
+        digitalWrite(relay2Pin, LOW);
+        Serial.println("已执行关闭继电器2操作");
+    }
+    server.send(200, "text/plain", "Relay 2 state changed");
+}
+
+// 处理登录的函数
+void handleLogin() {
+    if (server.method() == HTTP_GET) {
+        String html = "<html><head><title>Login</title><style>"
+                      "body {"
+                      " background-color: #6C5CE7;"
+                      " color: white;"
+                      " font-family: Arial, sans-serif;"
+                      " text-align: center;"
+                      " padding-top: 50px;"
+                      "}"
+                      "form {"
+                      " margin-top: 50px;"
+                      "}"
+                      "input {"
+                      " padding: 10px; margin: 10px;"
+                      "}"
+                      "button {"
+                      " padding: 10px 20px;"
+                      "}"
+                      "</style></head><body>"
+                      "<h1>Login</h1>"
+                      "<form method='post' action='/login'>"
+                      "Username: <input type='text' name='username'><br>"
+                      "Password: <input type='password' name='password'><br>"
+                      "<button type='submit'>Login</button>"
+                      "</form>"
+                      "</body></html>";
+        server.send(200, "text/html", html);
+    } else if (server.method() == HTTP_POST) {
+        String username = server.arg("username");
+        String password = server.arg("password");
+        if (username == adminUsername && password == adminPassword) {
+            isLoggedIn = true;
+            server.sendHeader("Location", "/");
+            server.send(303);
+        } else {
+            server.send(401, "text/html", "无效的用户名或密码");
+        }
+    }
+}
+
+// 处理任务列表的函数
+void handleTaskList() {
+    if (!isLoggedIn) {
+        server.sendHeader("Location", "/login");
+        server.send(303);
+        return;
+    }
+    String html = "<!DOCTYPE html>"
+                  "<html lang=\"zh-CN\">"
+                  "<head>"
+                  "<meta charset=\"UTF-8\">"
+                  "<title>定时任务列表</title>"
+                  "<style>"
+                  "body {"
+                  " background-color: #4CAF50;"
+                  " color: white;"
+                  " font-family: Arial, sans-serif;"
+                  " text-align: center;"
+                  " padding-top: 50px;"
+                  "}"
+                  "a {"
+                  " display: block;"
+                  " margin: 20px 0;"
+                  " padding: 10px 20px;"
+                  " background-color: #008CBA;"
+                  " color: white;"
+                  " text-decoration: none;"
+                  " border-radius: 5px;"
+                  "}"
+                  "a:hover {"
+                  " background-color: #005f73;"
+                  "}"
+                  "</style>"
+                  "</head>"
+                  "<body>"
+                  "<h1>定时任务列表</h1>"
+                  "<p>这里是定时任务的列表。</p>"
+                  "<a href=\"/addTask\">添加新任务</a>"
+                  "<a href=\"/editTask\">编辑任务</a>"
+                  "<a href=\"/deleteTask\">删除任务</a>"
+                  "</body>"
+                  "</html>";
+    server.send(200, "text/html; charset=utf-8", html);
+}
+
+// 判断当前时间是否在指定时间段内的函数
+bool isInOnPeriod(int startHour, int startMinute, int endHour, int endMinute) {
+    TimeInfo currentTime = getCurrentTime();
+    int currentTotalMinutes = currentTime.hour * 60 + currentTime.minute;
+    int startTotalMinutes = startHour * 60 + startMinute;
+    int endTotalMinutes = endHour * 60 + endMinute;
+    if (endTotalMinutes < startTotalMinutes) {
+        // 跨越到第二天的情况
+        return currentTotalMinutes >= startTotalMinutes || currentTotalMinutes < endTotalMinutes;
+    } else {
+        // 同一天的情况
+        return currentTotalMinutes >= startTotalMinutes && currentTotalMinutes < endTotalMinutes;
+    }
+}
+/*
+
+
+// 写入单个字节到EEPROM，并返回操作是否成功
+bool writeEEPROMByte(uint8_t address, byte value) {
+    Wire.beginTransmission(0x50); // EEPROM I2C地址
+    Wire.write(address);
+    Wire.write(value);
+    byte error = Wire.endTransmission();
+    if (error != 0) {
+        Serial.print("I2C写入错误: ");
+        Serial.println(error);
+        return false;
+    }
+    return true;
+}
+
+// 初始化EEPROM内容
+void initializeEEPROM() {
+    for (uint16_t i = 0; i < 256; i++) { // 假设EEPROM大小为256字节
+        writeEEPROMByte(i, 0xFF);
+    }
+}
+
+// 页读取函数
+bool readPageFromEEPROM(uint8_t startAddress, byte* data, int numBytes) {
+    Wire.beginTransmission(0x50); // EEPROM I2C地址
+    Wire.write(startAddress);
+    byte error = Wire.endTransmission(false);
+    if (error == 0) {
+        Wire.requestFrom(0x50, std::min((size_t)numBytes, (size_t)8)); // 每页8字节
+        int i = 0;
+        while (Wire.available() && i < numBytes) {
+            data[i++] = Wire.read();
+        }
+        return true;
+    }
+    Serial.print("I2C读取页面前错误: ");
+    Serial.println(error);
+    return false;
+}
+
+// 验证定时数据格式的函数
+bool validateTimingData(const char *data) {
+    if (strlen(data) != 9) {
+        return false;
+    }
+    for (int i = 0; i < 8; i++) {
+        if (data[i] < '0' || data[i] > '9') {
+            return false;
+        }
+    }
+    if (data[8] != '0' && data[8] != '1') {
+        return false;
+    }
+    return true;
+}
+
+// 解析定时数据的函数
+void parseTimingData(const char *data, int& startHour, int& startMinute, int& endHour, int& endMinute, bool& isTimed) {
+    startHour = (data[0] - '0') * 10 + (data[1] - '0');
+    startMinute = (data[2] - '0') * 10 + (data[3] - '0');
+    endHour = (data[4] - '0') * 10 + (data[5] - '0');
+    endMinute = (data[6] - '0') * 10 + (data[7] - '0');
+
+    if (startHour < 0 || startHour > 23) {
+        startHour = 0;
+    }
+    if (startMinute < 0 || startMinute > 59) {
+        startMinute = 0;
+    }
+    if (endHour < 0 || endHour > 23) {
+        endHour = 0;
+    }
+    if (endMinute < 0 || endMinute > 59) {
+        endMinute = 0;
+    }
+
+    isTimed = data[8] == '1';
+}
+
+// 将定时设置数据写入EEPROM，并处理跨页边界的情况
+void writeTimingSettingsToEEPROM() {
+    // 构建定时1设置数据字符串
+    char data1[9];
+    sprintf(data1, "%02d%02d%02d%02d%c", 
+            startHourForGroup1, startMinuteForGroup1, 
+            endHourForGroup1, endMinuteForGroup1, 
+            isTimedGroup1 ? '1' : '0');
+    Serial.print("Writing timing 1: ");
+    Serial.println(data1);
+
+    byte dataArray1[9]; // 使用正确的大小
+    for (int i = 0; i < 9; i++) {
+        dataArray1[i] = data1[i];
+    }
+
+    // 分别写入前8个字节和第9个字节
+    if (!writeEEPROMByte(0, dataArray1[0]) || !writeEEPROMByte(1, dataArray1[1]) ||
+        !writeEEPROMByte(2, dataArray1[2]) || !writeEEPROMByte(3, dataArray1[3]) ||
+        !writeEEPROMByte(4, dataArray1[4]) || !writeEEPROMByte(5, dataArray1[5]) ||
+        !writeEEPROMByte(6, dataArray1[6]) || !writeEEPROMByte(7, dataArray1[7]) ||
+        !writeEEPROMByte(8, dataArray1[8])) {
+        Serial.println("Failed to write timing settings for Group 1.");
+        return;
+    }
+
+    // 验证写入
+    verifyWrite(0, "timing 1");
+
+    // 构建定时2设置数据字符串
+    char data2[9];
+    sprintf(data2, "%02d%02d%02d%02d%c", 
+            startHourForGroup2, startMinuteForGroup2, 
+            endHourForGroup2, endMinuteForGroup2, 
+            isTimedGroup2 ? '1' : '0');
+    Serial.print("Writing timing 2: ");
+    Serial.println(data2);
+
+    byte dataArray2[9]; // 使用正确的大小
+    for (int i = 0; i < 9; i++) {
+        dataArray2[i] = data2[i];
+    }
+
+    // 分别写入前8个字节和第9个字节
+    if (!writeEEPROMByte(9, dataArray2[0]) || !writeEEPROMByte(10, dataArray2[1]) ||
+        !writeEEPROMByte(11, dataArray2[2]) || !writeEEPROMByte(12, dataArray2[3]) ||
+        !writeEEPROMByte(13, dataArray2[4]) || !writeEEPROMByte(14, dataArray2[5]) ||
+        !writeEEPROMByte(15, dataArray2[6]) || !writeEEPROMByte(16, dataArray2[7]) ||
+        !writeEEPROMByte(17, dataArray2[8])) {
+        Serial.println("Failed to write timing settings for Group 2.");
+        return;
+    }
+
+    // 验证写入
+    verifyWrite(9, "timing 2");
+
+    Serial.println("Timing settings written and verified successfully.");
+}
+
+// 在写入之后立即读回并打印数据以验证写入是否成功
+void verifyWrite(uint8_t startAddress, const char* description) {
+    byte dataArray[9];
+    if (readPageFromEEPROM(startAddress, dataArray, 8) && readPageFromEEPROM(startAddress + 8, &dataArray[8], 1)) {
+        char data[10];
+        for (int i = 0; i < 9; i++) {
+            data[i] = (char)dataArray[i];
+        }
+        data[9] = '\0'; // Null-terminate the string
+        Serial.print("Verified " + String(description) + ": ");
+        Serial.println(data);
+    } else {
+        Serial.println("Verification failed for " + String(description));
+    }
+}
+
+// 从EEPROM读取定时设置数据的函数，添加数据合法性检查和读取前后延迟
+void readTimingSettingsFromEEPROM() {
+    delay(20);  // 读取前增加延迟
+
+    // 读取定时1设置
+    byte dataArray1[9];
+    if (readPageFromEEPROM(0, dataArray1, 8) && readPageFromEEPROM(8, &dataArray1[8], 1)) {
+        char data1[10];
+        for (int i = 0; i < 9; i++) {
+            data1[i] = (char)dataArray1[i];
+        }
+        data1[9] = '\0'; // Null-terminate the string
+        Serial.print("Read timing 1: ");
+        Serial.println(data1);
+        if (validateTimingData(data1)) {
+            parseTimingData(data1, startHourForGroup1, startMinuteForGroup1, endHourForGroup1, endMinuteForGroup1, isTimedGroup1);
+            Serial.print("Parsed timing 1: ");
+            Serial.print(startHourForGroup1); Serial.print(":"); Serial.print(startMinuteForGroup1);
+            Serial.print(" - "); 
+            Serial.print(endHourForGroup1); Serial.print(":"); Serial.println(endMinuteForGroup1);
+            Serial.print("Is timed: "); Serial.println(isTimedGroup1);
+        } else {
+            Serial.println("定时1读取数据格式无效");
+        }
+    } else {
+        Serial.println("定时1读取数据失败");
+    }
+
+    // 读取定时2设置
+    byte dataArray2[9];
+    if (readPageFromEEPROM(9, dataArray2, 8) && readPageFromEEPROM(17, &dataArray2[8], 1)) {
+        char data2[10];
+        for (int i = 0; i < 9; i++) {
+            data2[i] = (char)dataArray2[i];
+        }
+        data2[9] = '\0'; // Null-terminate the string
+        Serial.print("Read timing 2: ");
+        Serial.println(data2);
+        if (validateTimingData(data2)) {
+            parseTimingData(data2, startHourForGroup2, startMinuteForGroup2, endHourForGroup2, endMinuteForGroup2, isTimedGroup2);
+            Serial.print("Parsed timing 2: ");
+            Serial.print(startHourForGroup2); Serial.print(":"); Serial.print(startMinuteForGroup2);
+            Serial.print(" - "); 
+            Serial.print(endHourForGroup2); Serial.print(":"); Serial.println(endMinuteForGroup2);
+            Serial.print("Is timed: "); Serial.println(isTimedGroup2);
+        } else {
+            Serial.println("定时2读取数据格式无效");
+        }
+    } else {
+        Serial.println("定时2读取数据失败");
+    }
+
+    delay(20);  // 读取后增加延迟
+}
+
+// 控制组的状态
+void controlGroup(int group, bool shouldTurnOn) {
+    static bool lastState[3] = {false}; // 假设最多有3个组
+    
+    if (shouldTurnOn != lastState[group]) {
+        lastState[group] = shouldTurnOn;
+        if (shouldTurnOn) {
+            Serial.print("Group "); Serial.print(group); Serial.println(" is ON");
+            // 控制Group 打开的代码
+        } else {
+            Serial.print("Group "); Serial.print(group); Serial.println(" is OFF");
+            // 控制Group 关闭的代码
+        }
+    }
+}
+
+// 检查定时器并控制组的状态
+void checkTimersAndControlGroups() {
+    int currentHour = hour(); // 获取当前小时
+    int currentMinute = minute(); // 获取当前分钟
+
+    // 检查定时1
+    if (isTimedGroup1) {
+        bool isWithinTimeRange = 
+            (currentHour > startHourForGroup1 || (currentHour == startHourForGroup1 && currentMinute >= startMinuteForGroup1)) &&
+            (currentHour < endHourForGroup1 || (currentHour == endHourForGroup1 && currentMinute < endMinuteForGroup1));
+
+        Serial.print("Checking Group 1 at time: ");
+        Serial.print(currentHour); Serial.print(":"); Serial.println(currentMinute);
+        Serial.print("isWithinTimeRange: "); Serial.println(isWithinTimeRange);
+
+        controlGroup(1, isWithinTimeRange);
+    } else {
+        controlGroup(1, false);
+    }
+
+    // 检查定时2
+    if (isTimedGroup2) {
+        bool isWithinTimeRange = 
+            (currentHour > startHourForGroup2 || (currentHour == startHourForGroup2 && currentMinute >= startMinuteForGroup2)) &&
+            (currentHour < endHourForGroup2 || (currentHour == endHourForGroup2 && currentMinute < endMinuteForGroup2));
+
+        Serial.print("Checking Group 2 at time: ");
+        Serial.print(currentHour); Serial.print(":"); Serial.println(currentMinute);
+        Serial.print("isWithinTimeRange: "); Serial.println(isWithinTimeRange);
+
+        controlGroup(2, isWithinTimeRange);
+    } else {
+        controlGroup(2, false);
+    }
+}
+*/
+/*
+// 写入单个字节到EEPROM，并返回操作是否成功
+bool writeEEPROMByte(uint8_t address, byte value) {
+    Wire.beginTransmission(0x50); // EEPROM I2C地址
+    Wire.write(address);
+    Wire.write(value);
+    byte error = Wire.endTransmission();
+    if (error != 0) {
+        Serial.print("I2C写入错误: ");
+        Serial.println(error);
+        return false;
+    }
+    return true;
+}
+
+// 分页写入EEPROM
+bool pageWriteToEEPROM(uint8_t startAddress, byte* data, int numBytes) {
+    for (int i = 0; i < numBytes; i++) {
+        if (!writeEEPROMByte(startAddress + i, data[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// 初始化EEPROM内容
+void initializeEEPROM() {
+    for (uint16_t i = 0; i < 256; i++) { // 假设EEPROM大小为256字节
+        writeEEPROMByte(i, 0xFF);
+    }
+}
+
+// 页读取函数
+bool readPageFromEEPROM(uint8_t startAddress, byte* data, int numBytes) {
+    Wire.beginTransmission(0x50); // EEPROM I2C地址
+    Wire.write(startAddress);
+    byte error = Wire.endTransmission(false);
+    if (error == 0) {
+        Wire.requestFrom(0x50, std::min((size_t)numBytes, (size_t)8)); // 每页8字节
+        int i = 0;
+        while (Wire.available() && i < numBytes) {
+            data[i++] = Wire.read();
+        }
+        return true;
+    }
+    Serial.print("I2C读取页面前错误: ");
+    Serial.println(error);
+    return false;
+}
+
+// 验证定时数据格式的函数
+bool validateTimingData(const char *data) {
+    if (strlen(data) != 9) {
+        return false;
+    }
+    for (int i = 0; i < 8; i++) {
+        if (data[i] < '0' || data[i] > '9') {
+            return false;
+        }
+    }
+    if (data[8] != '0' && data[8] != '1') {
+        return false;
+    }
+    return true;
+}
+
+// 解析定时数据的函数
+void parseTimingData(const char *data, int& startHour, int& startMinute, int& endHour, int& endMinute, bool& isTimed) {
+    startHour = (data[0] - '0') * 10 + (data[1] - '0');
+    startMinute = (data[2] - '0') * 10 + (data[3] - '0');
+    endHour = (data[4] - '0') * 10 + (data[5] - '0');
+    endMinute = (data[6] - '0') * 10 + (data[7] - '0');
+
+    // 确保小时和分钟的有效性
+    startHour = constrain(startHour, 0, 23);
+    startMinute = constrain(startMinute, 0, 59);
+    endHour = constrain(endHour, 0, 23);
+    endMinute = constrain(endMinute, 0, 59);
+
+    isTimed = data[8] == '1';
+}
+
+// 将定时设置数据写入EEPROM，并处理跨页边界的情况
+void writeTimingSettingsToEEPROM() {
+    // 构建定时1设置数据字符串
+    char data1[10];
+    sprintf(data1, "%02d%02d%02d%02d%c", 
+            startHourForGroup1, startMinuteForGroup1, 
+            endHourForGroup1, endMinuteForGroup1, 
+            isTimedGroup1 ? '1' : '0');
+    Serial.print("Writing timing 1: ");
+    Serial.println(data1);
+
+    byte dataArray1[9]; // 使用正确的大小
+    for (int i = 0; i < 9; i++) {
+        dataArray1[i] = data1[i];
+    }
+
+    // 写入前8个字节
+    if (!pageWriteToEEPROM(0, dataArray1, 8)) { // 写入前8个字节
+        Serial.println("Failed to write first 8 bytes of timing settings for Group 1.");
+        return;
+    }
+    // 写入第9个字节
+    if (!writeEEPROMByte(8, dataArray1[8])) { // 写入第9个字节
+        Serial.println("Failed to write last byte of timing settings for Group 1.");
+        return;
+    }
+
+    // 验证写入
+    verifyWrite(0, "timing 1");
+
+    // 构建定时2设置数据字符串
+    char data2[10];
+    sprintf(data2, "%02d%02d%02d%02d%c", 
+            startHourForGroup2, startMinuteForGroup2, 
+            endHourForGroup2, endMinuteForGroup2, 
+            isTimedGroup2 ? '1' : '0');
+    Serial.print("Writing timing 2: ");
+    Serial.println(data2);
+
+    byte dataArray2[9]; // 使用正确的大小
+    for (int i = 0; i < 9; i++) {
+        dataArray2[i] = data2[i];
+    }
+
+    // 写入前8个字节
+    if (!pageWriteToEEPROM(9, dataArray2, 8)) { // 写入前8个字节
+        Serial.println("Failed to write first 8 bytes of timing settings for Group 2.");
+        return;
+    }
+    // 写入第9个字节
+    if (!writeEEPROMByte(17, dataArray2[8])) { // 写入第9个字节
+        Serial.println("Failed to write last byte of timing settings for Group 2.");
+        return;
+    }
+
+    // 验证写入
+    verifyWrite(9, "timing 2");
+
+    Serial.println("Timing settings written and verified successfully.");
+}
+
+// 在写入之后立即读回并打印数据以验证写入是否成功
+void verifyWrite(uint8_t startAddress, const char* description) {
+    byte dataArray[9];
+    if (readPageFromEEPROM(startAddress, dataArray, 8) && readPageFromEEPROM(startAddress + 8, &dataArray[8], 1)) {
+        char data[10];
+        for (int i = 0; i < 9; i++) {
+            data[i] = (char)dataArray[i];
+        }
+        data[9] = '\0'; // Null-terminate the string
+        Serial.print("Verified " + String(description) + ": ");
+        Serial.println(data);
+    } else {
+        Serial.println("Verification failed for " + String(description));
+    }
+}
+
+// 从EEPROM读取定时设置数据的函数，添加数据合法性检查和读取前后延迟
+void readTimingSettingsFromEEPROM() {
+    delay(20);  // 读取前增加延迟
+
+    // 读取定时1设置
+    byte dataArray1[9];
+    if (readPageFromEEPROM(0, dataArray1, 8) && readPageFromEEPROM(8, &dataArray1[8], 1)) {
+        char data1[10];
+        for (int i = 0; i < 9; i++) {
+            data1[i] = (char)dataArray1[i];
+        }
+        data1[9] = '\0'; // Null-terminate the string
+        Serial.print("Read timing 1: ");
+        Serial.println(data1);
+        if (validateTimingData(data1)) {
+            parseTimingData(data1, startHourForGroup1, startMinuteForGroup1, endHourForGroup1, endMinuteForGroup1, isTimedGroup1);
+            Serial.print("Parsed timing 1: ");
+            Serial.print(startHourForGroup1); Serial.print(":"); Serial.print(startMinuteForGroup1);
+            Serial.print(" - "); 
+            Serial.print(endHourForGroup1); Serial.print(":"); Serial.println(endMinuteForGroup1);
+            Serial.print("Is timed: "); Serial.println(isTimedGroup1);
+        } else {
+            Serial.println("定时1读取数据格式无效");
+        }
+    } else {
+        Serial.println("定时1读取数据失败");
+    }
+
+    // 读取定时2设置
+    byte dataArray2[9];
+    if (readPageFromEEPROM(9, dataArray2, 8) && readPageFromEEPROM(17, &dataArray2[8], 1)) {
+        char data2[10];
+        for (int i = 0; i < 9; i++) {
+            data2[i] = (char)dataArray2[i];
+        }
+        data2[9] = '\0'; // Null-terminate the string
+        Serial.print("Read timing 2: ");
+        Serial.println(data2);
+        if (validateTimingData(data2)) {
+            parseTimingData(data2, startHourForGroup2, startMinuteForGroup2, endHourForGroup2, endMinuteForGroup2, isTimedGroup2);
+            Serial.print("Parsed timing 2: ");
+            Serial.print(startHourForGroup2); Serial.print(":"); Serial.print(startMinuteForGroup2);
+            Serial.print(" - "); 
+            Serial.print(endHourForGroup2); Serial.print(":"); Serial.println(endMinuteForGroup2);
+            Serial.print("Is timed: "); Serial.println(isTimedGroup2);
+        } else {
+            Serial.println("定时2读取数据格式无效");
+        }
+    } else {
+        Serial.println("定时2读取数据失败");
+    }
+
+    delay(20);  // 读取后增加延迟
+}
+
+// 控制组的状态
+void controlGroup(int group, bool shouldTurnOn) {
+    static bool lastState[3] = {false}; // 假设最多有3个组
+    
+    if (shouldTurnOn != lastState[group]) {
+        lastState[group] = shouldTurnOn;
+        if (shouldTurnOn) {
+            Serial.print("Group "); Serial.print(group); Serial.println(" is ON");
+            // 控制Group 打开的代码
+        } else {
+            Serial.print("Group "); Serial.print(group); Serial.println(" is OFF");
+            // 控制Group 关闭的代码
+        }
+    }
+}
+
+// 检查定时器并控制组的状态
+void checkTimersAndControlGroups() {
+    int currentHour = hour(); // 获取当前小时
+    int currentMinute = minute(); // 获取当前分钟
+
+    // 检查定时1
+    if (isTimedGroup1) {
+        bool isWithinTimeRange = 
+            (currentHour > startHourForGroup1 || (currentHour == startHourForGroup1 && currentMinute >= startMinuteForGroup1)) &&
+            (currentHour < endHourForGroup1 || (currentHour == endHourForGroup1 && currentMinute < endMinuteForGroup1));
+
+        Serial.print("Checking Group 1 at time: ");
+        Serial.print(currentHour); Serial.print(":"); Serial.println(currentMinute);
+        Serial.print("isWithinTimeRange: "); Serial.println(isWithinTimeRange);
+
+        controlGroup(1, isWithinTimeRange);
+    } else {
+        controlGroup(1, false);
+    }
+
+    // 检查定时2
+    if (isTimedGroup2) {
+        bool isWithinTimeRange = 
+            (currentHour > startHourForGroup2 || (currentHour == startHourForGroup2 && currentMinute >= startMinuteForGroup2)) &&
+            (currentHour < endHourForGroup2 || (currentHour == endHourForGroup2 && currentMinute < endMinuteForGroup2));
+
+        Serial.print("Checking Group 2 at time: ");
+        Serial.print(currentHour); Serial.print(":"); Serial.println(currentMinute);
+        Serial.print("isWithinTimeRange: "); Serial.println(isWithinTimeRange);
+
+        controlGroup(2, isWithinTimeRange);
+    } else {
+        controlGroup(2, false);
+    }
+}
+*/
+
+// 验证定时数据格式的函数
+bool validateTimingData(const char *data) {
+    if (strlen(data) != 9) {
+        return false;
+    }
+    for (int i = 0; i < 8; i++) {
+        if (data[i] < '0' || data[i] > '9') {
+            return false;
+        }
+    }
+    if (data[8] != '0' && data[8] != '1') {
+        return false;
+    }
+    return true;
+}
+
+// 解析定时数据的函数
+void parseTimingData(const char *data, int& startHour, int& startMinute, int& endHour, int& endMinute, bool& isTimed) {
+    startHour = (data[0] - '0') * 10 + (data[1] - '0');
+    startMinute = (data[2] - '0') * 10 + (data[3] - '0');
+    endHour = (data[4] - '0') * 10 + (data[5] - '0');
+    endMinute = (data[6] - '0') * 10 + (data[7] - '0');
+
+    // 确保小时和分钟的有效性
+    startHour = constrain(startHour, 0, 23);
+    startMinute = constrain(startMinute, 0, 59);
+    endHour = constrain(endHour, 0, 23);
+    endMinute = constrain(endMinute, 0, 59);
+
+    isTimed = data[8] == '1';
+}
+
+// 将定时设置数据写入内置Flash模拟EEPROM
+void writeTimingSettingsToEEPROM() {
+    // 构建定时1设置数据字符串
+    char data1[10];
+    sprintf(data1, "%02d%02d%02d%02d%c", 
+            startHourForGroup1, startMinuteForGroup1, 
+            endHourForGroup1, endMinuteForGroup1, 
+            isTimedGroup1 ? '1' : '0');
+    Serial.print("Writing timing 1: ");
+    Serial.println(data1);
+
+    for (int i = 0; i < 9; i++) {
+        EEPROM.write(i, data1[i]);
+    }
+    EEPROM.commit(); // 确保数据被写入Flash
+
+    // 验证写入
+    verifyWrite(0, "timing 1");
+
+    // 构建定时2设置数据字符串
+    char data2[10];
+    sprintf(data2, "%02d%02d%02d%02d%c", 
+            startHourForGroup2, startMinuteForGroup2, 
+            endHourForGroup2, endMinuteForGroup2, 
+            isTimedGroup2 ? '1' : '0');
+    Serial.print("Writing timing 2: ");
+    Serial.println(data2);
+
+    for (int i = 0; i < 9; i++) {
+        EEPROM.write(i + 9, data2[i]);
+    }
+    EEPROM.commit(); // 确保数据被写入Flash
+
+    // 验证写入
+    verifyWrite(9, "timing 2");
+
+    Serial.println("Timing settings written and verified successfully.");
+}
+
+// 在写入之后立即读回并打印数据以验证写入是否成功
+void verifyWrite(uint8_t startAddress, const char* description) {
+    char data[10];
+    for (int i = 0; i < 9; i++) {
+        data[i] = EEPROM.read(startAddress + i);
+    }
+    data[9] = '\0'; // Null-terminate the string
+    Serial.print("Verified " + String(description) + ": ");
+    Serial.println(data);
+}
+
+// 从内置Flash模拟EEPROM读取定时设置数据
+void readTimingSettingsFromEEPROM() {
+    // 读取定时1设置
+    char data1[10];
+    for (int i = 0; i < 9; i++) {
+        data1[i] = EEPROM.read(i);
+    }
+    data1[9] = '\0';
+    Serial.print("Read timing 1: ");
+    Serial.println(data1);
+    if (validateTimingData(data1)) {
+        parseTimingData(data1, startHourForGroup1, startMinuteForGroup1, endHourForGroup1, endMinuteForGroup1, isTimedGroup1);
+        Serial.print("Parsed timing 1: ");
+        Serial.print(startHourForGroup1); Serial.print(":"); Serial.print(startMinuteForGroup1);
+        Serial.print(" - "); 
+        Serial.print(endHourForGroup1); Serial.print(":"); Serial.println(endMinuteForGroup1);
+        Serial.print("Is timed: "); Serial.println(isTimedGroup1);
+    } else {
+        Serial.println("定时1读取数据格式无效");
+    }
+
+    // 读取定时2设置
+    char data2[10];
+    for (int i = 0; i < 9; i++) {
+        data2[i] = EEPROM.read(i + 9);
+    }
+    data2[9] = '\0';
+    Serial.print("Read timing 2: ");
+    Serial.println(data2);
+    if (validateTimingData(data2)) {
+        parseTimingData(data2, startHourForGroup2, startMinuteForGroup2, endHourForGroup2, endMinuteForGroup2, isTimedGroup2);
+        Serial.print("Parsed timing 2: ");
+        Serial.print(startHourForGroup2); Serial.print(":"); Serial.print(startMinuteForGroup2);
+        Serial.print(" - "); 
+        Serial.print(endHourForGroup2); Serial.print(":"); Serial.println(endMinuteForGroup2);
+        Serial.print("Is timed: "); Serial.println(isTimedGroup2);
+    } else {
+        Serial.println("定时2读取数据格式无效");
+    }
+}
+
+// 控制组的状态
+void controlGroup(int group, bool shouldTurnOn) {
+    static bool lastState[3] = {false}; // 假设最多有3个组
+    
+    if (shouldTurnOn != lastState[group]) {
+        lastState[group] = shouldTurnOn;
+        if (shouldTurnOn) {
+            Serial.print("Group "); Serial.print(group); Serial.println(" is ON");
+            // 控制Group 打开的代码
+        } else {
+            Serial.print("Group "); Serial.print(group); Serial.println(" is OFF");
+            // 控制Group 关闭的代码
+        }
+    }
+}
+
+// 检查定时器并控制组的状态
+void checkTimersAndControlGroups() {
+    int currentHour = hour(); // 获取当前小时
+    int currentMinute = minute(); // 获取当前分钟
+
+    // 检查定时1
+    if (isTimedGroup1) {
+        bool isWithinTimeRange = 
+            (currentHour > startHourForGroup1 || (currentHour == startHourForGroup1 && currentMinute >= startMinuteForGroup1)) &&
+            (currentHour < endHourForGroup1 || (currentHour == endHourForGroup1 && currentMinute < endMinuteForGroup1));
+
+        Serial.print("Checking Group 1 at time: ");
+        Serial.print(currentHour); Serial.print(":"); Serial.println(currentMinute);
+        Serial.print("isWithinTimeRange: "); Serial.println(isWithinTimeRange);
+
+        controlGroup(1, isWithinTimeRange);
+    } else {
+        controlGroup(1, false);
+    }
+
+    // 检查定时2
+    if (isTimedGroup2) {
+        bool isWithinTimeRange = 
+            (currentHour > startHourForGroup2 || (currentHour == startHourForGroup2 && currentMinute >= startMinuteForGroup2)) &&
+            (currentHour < endHourForGroup2 || (currentHour == endHourForGroup2 && currentMinute < endMinuteForGroup2));
+
+        Serial.print("Checking Group 2 at time: ");
+        Serial.print(currentHour); Serial.print(":"); Serial.println(currentMinute);
+        Serial.print("isWithinTimeRange: "); Serial.println(isWithinTimeRange);
+
+        controlGroup(2, isWithinTimeRange);
+    } else {
+        controlGroup(2, false);
+    }
+}
+// 重启设备函数
+void rebootDevice() {
+    if (!isLoggedIn) {
+        server.sendHeader("Location", "/login");
+        server.send(303);
+        return;
+    }
+    Serial.println("正在重启设备...");
+    ESP.restart();
+}
+
+// 清除WiFi配置函数
+void clearWifiConfig() {
+    if (!isLoggedIn) {
+        server.sendHeader("Location", "/login");
+        server.send(303);
+        return;
+    }
+    WiFiManager wifiManager;
+    wifiManager.resetSettings();
+    Serial.println("已清除WiFi配置信息，等待重新配置");
+    // 在OLED上显示提示信息告知用户配置已清除
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(WHITE);
+    display.setCursor(0, 0);
+    display.println("The WiFi configuration has been cleared, please reconfigure");
+    display.display();
+    // 等待一段时间，避免频繁触发清除操作（可根据实际调整等待时间）
+    delay(2000);
+}
+
+// 重新配置WiFi函数
+void reconfigureWiFi() {
+    // 停止当前的WiFi连接
+    WiFi.disconnect();
+    // 等待一段时间，确保WiFi完全停止（可根据实际情况调整等待时间）
+    delay(5000); 
+    // 使用WiFiManager进行重新配网
+    WiFiManager wifiManager;
+    if (!wifiManager.autoConnect("ESP8266_Setup")) {
+        Serial.println("重新配置WiFi失败");
+        // 可以在这里添加更多的错误处理逻辑，例如循环尝试重新配网或提供其他反馈
+    } else {
+        Serial.println("WiFi重新连接成功");
+        // 获取并更新IP地址
+        IPAddress localIP = WiFi.localIP();
+        ipAddressStr = "IP:" + String(localIP[0]) + "." + String(localIP[1]) + "." + String(localIP[2]) + "." + String(localIP[3]);
+        // 重置重新配网标记
+        isReconfiguring = false;
+        // 重置相关变量
+        powerOnWifiConnectAttempts = 0; 
+        isPowerOnInitialConnection = false; 
+    }
+}
+/*
+// WiFi连接成功回调函数定义
+void wifiConnectedCallback() {
+    Serial.println("WiFi连接成功，执行后续操作...");
+    // 这里可以添加连接成功后的其他操作，如更新IP地址显示、启动相关服务等
+    IPAddress localIP = WiFi.localIP();
+    ipAddressStr = "IP:" + String(localIP[0]) + "." + String(localIP[1]) + "." + String(localIP[2]) + "." + String(localIP[3]);
+    // 重置连接尝试相关变量（如果需要）
+    totalReconnectAttempts = 0;
+    wifiConnectAttempts = 0;
+    isInitialConnectionAttempt = false;
+    // 启动NTP时间同步（如果需要）
+    timeClient.begin();
+}
+
+// WiFi连接失败回调函数定义
+void wifiConnectFailedCallback() {
+    Serial.println("WiFi连接失败，执行错误处理...");
+    // 这里可以添加连接失败后的错误处理操作，如增加连接尝试次数、显示错误信息等
+    totalReconnectAttempts++;
+    wifiConnectAttempts++;
+    if (wifiConnectAttempts >= 10) {
+        // 如果多次尝试失败，考虑重新配置WiFi（这里只是示例，可根据实际需求调整）
+        isReconfiguring = true;
+        reconfigureWiFi();
+    }
+}
+*/
+void setup() {
+    Serial.begin(115200);
+    EEPROM.begin(1048576); // 根据需要调整大小
+    // 等待五分钟（300000毫秒），确保路由器启动完成，可根据实际路由器启动时长微调该值
+    //delay(300000);
+    totalReconnectAttempts = 0;
+    wifiConnectAttempts = 0; // 初始化新的连接尝试次数变量
+    isReconfiguring = false; // 初始化重新配网标记变量
+    powerOnWifiConnectAttempts = 0; // 初始化上电或重启后的连接尝试次数
+    isPowerOnInitialConnection = true; // 标记为首次连接尝试
+  
+WiFiManager wifiManager;
+if (!wifiManager.autoConnect("ESP8266_Setup")) {
+    // 如果初始连接失败，先处理失败情况（比如显示错误提示等）
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(WHITE);
+    display.setCursor(0, 0);
+    display.println(WIFI_CONNECT_FAILED_MSG);
+    display.display();
+    Serial.println(WIFI_CONNECT_FAILED_MSG);
+}
+
+    // 初始化输出引脚为低电平
+    pinMode(relay1Pin, OUTPUT);
+    digitalWrite(relay1Pin, LOW);
+    pinMode(relay2Pin, OUTPUT);
+    digitalWrite(relay2Pin, LOW);
+
+    // 设置I2C引脚并初始化EEPROM
+    Wire.begin(SDA_PIN, SCL_PIN);
+
+    // 初始化OLED屏幕
+    if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+        Serial.println(F("SSD1306分配失败"));
+        for (;;);
+    }
+    display.setTextSize(1);
+    display.setTextColor(WHITE);
+    display.setCursor(0, 0);
+    display.println("Loading");
+    display.display();
+    delay(2000);
+    display.clearDisplay();
+
+
+ 
+    // 初始化NTP客户端（如果需要）
+    timeClient.begin();
+
+    // 注册Web服务器路由处理函数
+    server.on("/", handleRoot);
+    server.on("/setTime1", handleSetTime1);
+    server.on("/setTime2", handleSetTime2);
+    server.on("/cancelTiming1", handleCancelTiming1);
+    server.on("/cancelTiming2", handleCancelTiming2);
+    server.on("/relay1", handleRelay1);
+    server.on("/relay2", handleRelay2);
+    server.on("/login", handleLogin);
+    server.on("/taskList", handleTaskList);
+    server.on("/reboot", rebootDevice);  // 注册重启设备路由
+    server.on("/clearWifiConfig", clearWifiConfig);  // 注册清除WiFi配置路由
+    server.begin();
+
+    // 获取并保存IP地址
+    IPAddress localIP = WiFi.localIP();
+    ipAddressStr = "IP:" + String(localIP[0]) + "." + String(localIP[1]) + "." + String(localIP[2]) + "." + String(localIP[3]);
+
+    // 确保时间同步（如果需要）
+    timeClient.update();
+
+    // 从EEPROM读取定时设置数据
+    readTimingSettingsFromEEPROM();
+
+    // 打印当前时间
+    TimeInfo currentTime = getCurrentTime();
+    Serial.print("当前时间: ");
+    Serial.print(currentTime.hour);
+    Serial.print(":");
+    Serial.print(currentTime.minute);
+    Serial.print(":");
+    Serial.println(currentTime.second);
+
+            // 打印读取到的数据
+    Serial.print("定时1：开始时间 ");
+    Serial.print(startHourForGroup1);
+    Serial.print(":");
+    Serial.print(startMinuteForGroup1);
+    Serial.print(" 结束时间 ");
+    Serial.print(endHourForGroup1);
+    Serial.print(":");
+    Serial.print(endMinuteForGroup1);
+    Serial.print(" 是否定时 ");
+    Serial.println(isTimedGroup1? "是" : "否");
+
+    Serial.print("定时2：开始时间 ");
+    Serial.print(startHourForGroup2);
+    Serial.print(":");
+    Serial.print(startMinuteForGroup2);
+    Serial.print(" 结束时间 ");
+    Serial.print(endHourForGroup2);
+    Serial.print(":");
+    Serial.print(endMinuteForGroup2);
+    Serial.print(" 是否定时 ");
+    Serial.println(isTimedGroup2? "是" : "否");
+
+}
+
+void loop() {
+    unsigned long currentMillis = millis();
+
+    // 检查并处理WiFi连接状态
+    checkWiFiConnection(currentMillis);
+
+    // 处理Web服务器客户端请求
+    server.handleClient();
+
+    // 更新时间相关操作（例如NTP时间同步等）
+    timeClient.update();
+
+    // 获取当前时间信息
+    TimeInfo currentTime = getCurrentTime();
+
+    // 根据定时设置控制继电器1状态
+    handleRelay1BasedOnTiming(currentTime);
+
+    // 根据定时设置控制继电器2状态
+    handleRelay2BasedOnTiming(currentTime);
+
+    // 定期更新IP地址显示以及OLED屏幕显示内容
+    updateDisplayAndIPInfo(currentMillis);
+
+    // 如果WiFi连接成功，重置断网开始时间变量
+    if (WiFi.status() == WL_CONNECTED) {
+        disconnectionStartTimeMillis = 0;
+    }
+
+    // 可以添加其他需要在循环中不断执行的操作逻辑（例如传感器数据读取、其他设备控制等）
+    delay(1000);
+}
+
+// 检查并处理WiFi连接状态的函数
+void checkWiFiConnection(unsigned long currentMillis) {
+    if (WiFi.status() == WL_CONNECTED) {
+        // 调用WiFi连接成功的回调函数，执行相关操作
+        wifiConnectedCallback();
+    } else {
+        // 调用WiFi连接失败的回调函数，执行相应错误处理
+        wifiConnectFailedCallback();
+    }
+}
+
+// WiFi连接成功时的回调处理函数（可根据实际需求进一步扩展功能）
+void wifiConnectedCallback() {
+    Serial.println("WiFi连接成功，执行后续操作...");
+    // 更新IP地址并保存为字符串形式，用于显示等用途
+    IPAddress localIP = WiFi.localIP();
+    ipAddressStr = "IP:" + String(localIP[0]) + "." + String(localIP[1]) + "." + String(localIP[2]) + "." + String(localIP[3]);
+    // 重置连接尝试相关变量（例如总的重连次数、本次连接尝试次数等）
+    totalReconnectAttempts = 0;
+    wifiConnectAttempts = 0;
+    isInitialConnectionAttempt = false;
+    // 启动NTP时间同步（如果之前未启动或者需要重新同步等情况）
+    timeClient.begin();
+}
+
+void wifiConnectFailedCallback() {
+    Serial.println("WiFi连接失败，执行错误处理...");
+
+    // 如果是首次发现断网，记录断网开始时间（以毫秒为单位）
+    if (disconnectionStartTimeMillis == 0) {
+        disconnectionStartTimeMillis = millis();
+    }
+
+    // 增加总的重连尝试次数
+    totalReconnectAttempts++;
+    // 增加本次连接尝试次数
+    wifiConnectAttempts++;
+
+    // 判断是否达到多次尝试连接失败的阈值，这里设置为150次，可根据实际情况调整
+    if (wifiConnectAttempts >= 150) {
+        isReconfiguring = true;
+        reconfigureWiFi();
+    } else {
+        // 根据断网时间动态调整连接尝试间隔时间（以毫秒为单位）
+        unsigned long disconnectionDurationMillis = millis() - disconnectionStartTimeMillis;
+        unsigned long delayMillis;
+        if (disconnectionDurationMillis < 60000) {
+            // 如果断网时间小于60秒（60000毫秒），等待10秒（10000毫秒）后再尝试连接
+            delayMillis = 10000;
+        } else if (disconnectionDurationMillis < 300000) {
+            // 如果断网时间在60秒（60000毫秒）到300秒（300000毫秒）之间，等待30秒（30000毫秒）后再尝试连接
+            delayMillis = 30000;
+        } else {
+            // 如果断网时间大于300秒（300000毫秒），等待60秒（60000毫秒）后再尝试连接
+            delayMillis = 60000;
+        }
+        delay(delayMillis);  
+
+        Serial.print("本次连接尝试间隔: ");
+        Serial.print(delayMillis);
+        Serial.println(" 毫秒");
+
+        // 计算本次连接尝试耗时（以毫秒为单位），并在串口输出，便于了解每次连接情况
+        unsigned long currentConnectAttemptTimeElapsedMillis = millis() - (disconnectionStartTimeMillis + delayMillis);
+        Serial.print("本次连接尝试耗时: ");
+        Serial.print(currentConnectAttemptTimeElapsedMillis);
+        Serial.println(" 毫秒");
+    }
+}
+// 根据定时设置控制继电器1状态的函数
+void handleRelay1BasedOnTiming(TimeInfo currentTime) {
+    if (isTimedGroup1) {
+        bool isInOnPeriodForGroup1 = isInOnPeriod(startHourForGroup1, startMinuteForGroup1, endHourForGroup1, endMinuteForGroup1);
+        if (isInOnPeriodForGroup1) {
+            digitalWrite(relay1Pin, HIGH);
+            Serial.println("Group 1 is ON");
+        } else {
+            digitalWrite(relay1Pin, LOW);
+            Serial.println("Group 1 is OFF");
+        }
+    }
+}
+
+// 根据定时设置控制继电器2状态的函数
+void handleRelay2BasedOnTiming(TimeInfo currentTime) {
+    if (isTimedGroup2) {
+        bool isInOnPeriodForGroup2 = isInOnPeriod(startHourForGroup2, startMinuteForGroup2, endHourForGroup2, endMinuteForGroup2);
+        if (isInOnPeriodForGroup2) {
+            digitalWrite(relay2Pin, HIGH);
+            Serial.println("Group 2 is ON");
+        } else {
+            digitalWrite(relay2Pin, LOW);
+            Serial.println("Group 2 is OFF");
+        }
+    }
+}
+
+// 定期更新IP地址显示以及OLED屏幕显示内容的函数
+void updateDisplayAndIPInfo(unsigned long currentMillis) {
+    static unsigned long lastIPCheckTime = 0;
+    // 每5分钟（300000毫秒）检查一次是否需要更新显示内容和IP地址信息
+    if (millis() - lastIPCheckTime >= 300000) {
+        if (WiFi.status() == WL_CONNECTED) {
+            IPAddress localIP = WiFi.localIP();
+            ipAddressStr = "IP:" + String(localIP[0]) + "." + String(localIP[1]) + "." + String(localIP[2]) + "." + String(localIP[3]);
+        }
+        updateOLED();
+        lastIPCheckTime = millis();
+    }
+        updateOLED();
+    delay(1000);
+}
